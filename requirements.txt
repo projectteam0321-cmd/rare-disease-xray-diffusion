@@ -15,8 +15,8 @@ pillow==11.0.0
 opencv-python==4.8.1.78
 
 # Data Processing & Analysis
-numpy==1.26.3
-pandas==2.1.4
+numpy==2.0.0
+pandas==2.2.2
 scipy==1.11.4
 
 # Machine Learning & Model Evaluation
@@ -45,4 +45,4 @@ black==23.12.1
 flake8==7.0.0
 
 # Additional Utilities
-Pillow-SIMD==9.0.0.post1; platform_machine == 'x86_64'  # Optional: faster image processing
+platform_machine == 'x86_64'  # Optional: faster image processing
