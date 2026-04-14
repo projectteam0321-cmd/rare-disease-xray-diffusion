@@ -1,146 +1,619 @@
-import streamlit as st
-from PIL import Image
-import numpy as np
-import time
+"""
+Streamlit Application - Chest X-Ray Disease Classification
+Domain-Adaptive Synthetic Data Generation for Rare Disease Chest X-Ray Classification
+Using Conditional Diffusion Models
 
-# ==========================================
-# 1. PAGE CONFIGURATION
-# ==========================================
+Role: Explainability & Deployment Developer
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import torch
+from PIL import Image
+import io
+from pathlib import Path
+from datetime import datetime
+
+# Import custom modules
+from app.utils.auth import signup, login, user_exists, email_exists, get_user
+from app.utils.preprocess import load_and_preprocess, preprocess_image, denormalize_tensor
+from app.utils.predict import predict_image, get_prediction_dict, model_exists, get_model_info
+from app.utils.gradcam import generate_gradcam, heatmap_to_image, overlay_to_image
+from app.utils.logger import (
+    log_prediction_csv, 
+    read_prediction_logs, 
+    get_user_prediction_logs,
+    get_prediction_statistics,
+    export_prediction_logs
+)
+from app.utils.logger import setup_logger
+
+logger = setup_logger(__name__)
+
+# ============================================================================
+# PAGE CONFIGURATION
+# ============================================================================
+
 st.set_page_config(
-    page_title="Rare Disease X-ray Project - Day 2",
-    page_icon="🩻",
+    page_title="CXR Disease Classifier",
+    page_icon="🫁",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ==========================================
-# 2. IMAGE PREPROCESSING UTILITIES
-# ==========================================
-def preprocess_image(image: Image.Image):
-    """
-    Basic preprocessing: Resize to 224x224 and normalize placeholder.
-    """
-    # Resize to standard model input size
-    img_resized = image.resize((224, 224))
-    
-    # Convert to numpy array
-    img_array = np.array(img_resized).astype('float32')
-    
-    # Placeholder Normalization (e.g., scale to [0, 1])
-    img_normalized = img_array / 255.0
-    
-    return img_normalized
+# Custom CSS for better UI
+st.markdown("""
+<style>
+    .header-title {
+        font-size: 2.5rem;
+        color: #1f77b4;
+        font-weight: bold;
+        text-align: center;
+        margin-bottom: 10px;
+    }
+    .subtitle {
+        font-size: 1rem;
+        color: #666;
+        text-align: center;
+        margin-bottom: 20px;
+    }
+    .prediction-card {
+        padding: 20px;
+        border-radius: 10px;
+        background-color: #f0f2f6;
+        border-left: 5px solid #1f77b4;
+    }
+    .success-card {
+        padding: 15px;
+        border-radius: 10px;
+        background-color: #d4edda;
+        border-left: 5px solid #28a745;
+    }
+    .warning-card {
+        padding: 15px;
+        border-radius: 10px;
+        background-color: #fff3cd;
+        border-left: 5px solid #ffc107;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# ==========================================
-# 3. SIDEBAR NAVIGATION
-# ==========================================
-st.sidebar.title("🩺 Diagnostic Menu")
-app_mode = st.sidebar.selectbox(
-    "Choose Application Mode",
-    ["User Mode", "Admin Mode"]
-)
+# ============================================================================
+# SESSION STATE INITIALIZATION
+# ============================================================================
 
-st.sidebar.markdown("---")
-st.sidebar.write("**Project Status:** Day 2 Development")
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+if 'username' not in st.session_state:
+    st.session_state.username = None
+if 'email' not in st.session_state:
+    st.session_state.email = None
+if 'user_role' not in st.session_state:
+    st.session_state.user_role = "user"
 
-# ==========================================
-# 4. USER MODE: DIAGNOSTIC DASHBOARD
-# ==========================================
-if app_mode == "User Mode":
-    st.title("🩻 Chest X-Ray Analysis")
-    st.write("Upload a patient's chest X-ray for automated classification and attention mapping.")
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def logout():
+    """Logout user"""
+    st.session_state.authenticated = False
+    st.session_state.username = None
+    st.session_state.email = None
+    st.session_state.user_role = "user"
+    st.success("✅ Logged out successfully!")
+    st.rerun()
+
+
+def format_report(prediction_result, uploaded_filename):
+    """Format prediction result as text report"""
+    report = f"""
+{'='*60}
+CHEST X-RAY DISEASE CLASSIFICATION REPORT
+{'='*60}
+
+Patient Information:
+  Username: {st.session_state.username}
+  Email: {st.session_state.email}
+  Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Image Information:
+  Filename: {uploaded_filename}
+
+Prediction Results:
+  Predicted Disease: {prediction_result['class_name']}
+  Confidence Score: {prediction_result['confidence']:.2%}
+
+Probability Distribution:
+{chr(10).join([f"  {cls}: {prob:.4f}" for cls, prob in prediction_result['probabilities'].items()])}
+
+Medical Disclaimer:
+  This prediction is generated by an AI model for reference only.
+  Always consult with a qualified medical professional for diagnosis.
+
+{'='*60}
+Generated by: CXR Disease Classifier
+System: Domain-Adaptive Synthetic Data Generation for Rare Disease CXR Classification
+{'='*60}
+"""
+    return report
+
+
+# ============================================================================
+# PAGE: AUTHENTICATION (LOGIN/SIGNUP)
+# ============================================================================
+
+def auth_page():
+    """Display authentication page"""
+    col1, col2, col3 = st.columns([1, 2, 1])
     
-    # File Uploader
+    with col2:
+        st.markdown('<p class="header-title">🫁 CXR Disease Classifier</p>', unsafe_allow_html=True)
+        st.markdown('<p class="subtitle">Domain-Adaptive Synthetic Data Generation for Rare Disease Classification</p>', 
+                   unsafe_allow_html=True)
+        
+        auth_tab1, auth_tab2 = st.tabs(["Login", "Sign Up"])
+        
+        # LOGIN TAB
+        with auth_tab1:
+            st.subheader("🔐 User Login")
+            
+            login_username = st.text_input("Username", key="login_username")
+            login_password = st.text_input("Password", type="password", key="login_password")
+            
+            if st.button("Login", use_container_width=True, type="primary"):
+                if login_username and login_password:
+                    success, message, user_data = login(login_username, login_password)
+                    
+                    if success:
+                        st.session_state.authenticated = True
+                        st.session_state.username = user_data['username']
+                        st.session_state.email = user_data['email']
+                        st.session_state.user_role = user_data.get('role', 'user')
+                        logger.info(f"User logged in: {login_username}")
+                        st.success(f"✅ {message}")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {message}")
+                        logger.warning(f"Failed login attempt: {login_username}")
+                else:
+                    st.warning("⚠️ Please enter both username and password")
+        
+        # SIGNUP TAB
+        with auth_tab2:
+            st.subheader("📝 Create New Account")
+            
+            signup_username = st.text_input("Username", key="signup_username", 
+                                           help="Username must be at least 3 characters")
+            signup_email = st.text_input("Email", key="signup_email")
+            signup_password = st.text_input("Password", type="password", key="signup_password",
+                                           help="Password must be at least 6 characters")
+            signup_password_confirm = st.text_input("Confirm Password", type="password", 
+                                                   key="signup_password_confirm")
+            
+            if st.button("Sign Up", use_container_width=True, type="primary"):
+                # Validation
+                if not signup_username or not signup_email or not signup_password:
+                    st.warning("⚠️ Please fill in all fields")
+                elif signup_password != signup_password_confirm:
+                    st.error("❌ Passwords do not match")
+                elif user_exists(signup_username):
+                    st.error("❌ Username already taken")
+                elif email_exists(signup_email):
+                    st.error("❌ Email already registered")
+                else:
+                    success, message = signup(signup_username, signup_email, signup_password)
+                    if success:
+                        st.success(f"✅ {message}")
+                        st.info("🔐 Please log in with your credentials")
+                        logger.info(f"New user registered: {signup_username}")
+                    else:
+                        st.error(f"❌ {message}")
+
+
+# ============================================================================
+# PAGE: USER DASHBOARD
+# ============================================================================
+
+def user_dashboard():
+    """Display user dashboard with prediction interface"""
+    st.markdown(f'<p class="header-title">👤 User Dashboard</p>', unsafe_allow_html=True)
+    st.markdown(f"Welcome, **{st.session_state.username}**! 👋")
+    
+    # File uploader
+    st.subheader("📤 Upload Chest X-Ray Image")
     uploaded_file = st.file_uploader(
-        "Upload Chest X-Ray (PNG, JPG, JPEG)", 
-        type=["png", "jpg", "jpeg"]
+        "Choose an X-ray image (JPG, PNG, JPEG)",
+        type=["jpg", "jpeg", "png"],
+        help="Upload a chest X-ray image for disease classification"
     )
     
-    if uploaded_file:
-        # Load and Display Image
-        image = Image.open(uploaded_file)
-        
-        col1, col2 = st.columns([1, 1])
+    if uploaded_file is not None:
+        # Display original image
+        col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("Patient X-Ray")
-            st.image(image, use_container_width=True, caption="Original Upload")
-            
+            st.subheader("📸 Original Image")
+            img = Image.open(uploaded_file)
+            st.image(img, use_column_width=True)
+            image_info = f"Size: {img.size} | Mode: {img.mode}"
+            st.caption(image_info)
+        
+        # Preprocess and predict
         with col2:
-            st.subheader("Diagnostic Controls")
-            if st.button("🚀 Run Prediction"):
-                with st.spinner("Preprocessing and Analyzing..."):
-                    # Simulate processing time
-                    processed_data = preprocess_image(image)
-                    time.sleep(1.5) 
+            st.subheader("🔄 Processing...")
+            
+            with st.spinner("📊 Preprocessing image..."):
+                # Preprocess
+                tensor = preprocess_image(img)
+                if tensor is None:
+                    st.error("❌ Failed to preprocess image")
+                    return
+                
+                # Store tensor for Grad-CAM
+                st.session_state.last_tensor = tensor
+                st.session_state.last_image = np.array(img) / 255.0
+                
+                st.success("✅ Image preprocessed")
+            
+            with st.spinner("🧠 Making prediction..."):
+                # Predict
+                probs, class_idx, class_name = predict_image(tensor)
+                confidence = float(probs[class_idx])
+                
+                st.session_state.last_prediction = {
+                    'class_name': class_name,
+                    'confidence': confidence,
+                    'probabilities': {
+                        'Normal': float(probs[0]),
+                        'Pleural Effusion': float(probs[1]),
+                        'Cardiomegaly': float(probs[2])
+                    }
+                }
+                
+                st.success("✅ Prediction complete")
+        
+        # Display prediction results
+        st.subheader("🎯 Prediction Results")
+        
+        result = st.session_state.last_prediction
+        
+        # Prediction card
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Predicted Disease", result['class_name'])
+        
+        with col2:
+            confidence_pct = result['confidence'] * 100
+            st.metric("Confidence", f"{confidence_pct:.1f}%")
+        
+        with col3:
+            st.metric("Model Status", "✅ Ready")
+        
+        # Probability bar chart
+        st.subheader("📊 Probability Distribution")
+        prob_df = pd.DataFrame({
+            'Disease': list(result['probabilities'].keys()),
+            'Confidence': list(result['probabilities'].values())
+        })
+        prob_df = prob_df.sort_values('Confidence', ascending=False)
+        
+        fig = st.bar_chart(prob_df.set_index('Disease'))
+        
+        # Grad-CAM visualization
+        st.subheader("🔍 Explainability (Grad-CAM Visualization)")
+        
+        if st.checkbox("Generate Grad-CAM Heatmap", value=False):
+            with st.spinner("🔄 Generating Grad-CAM..."):
+                try:
+                    # Load model
+                    from app.utils.predict import get_model_predictor
+                    predictor = get_model_predictor()
                     
-                    # Dummy Prediction Results
-                    prediction = "Pneumonia Detected"
-                    confidence = 0.942
-                    
-                    # Display Prediction Output
-                    st.success(f"**Result:** {prediction}")
-                    st.metric(label="Confidence Score", value=f"{confidence:.2%}")
-                    
-                    st.info("Note: This is a placeholder prediction for Day 2 development.")
+                    if predictor.model is not None:
+                        # Generate Grad-CAM
+                        heatmap, overlaid = generate_gradcam(
+                            predictor.model,
+                            st.session_state.last_tensor,
+                            st.session_state.last_image,
+                            class_idx=class_idx,
+                            colormap='jet',
+                            alpha=0.5
+                        )
+                        
+                        # Display side-by-side
+                        grad_col1, grad_col2, grad_col3 = st.columns(3)
+                        
+                        with grad_col1:
+                            st.image(st.session_state.last_image, caption="Original Image")
+                        
+                        with grad_col2:
+                            st.image(heatmap, caption="Grad-CAM Heatmap", use_column_width=True)
+                        
+                        with grad_col3:
+                            st.image(overlaid, caption="Overlay", use_column_width=True)
+                        
+                        st.success("✅ Grad-CAM generated successfully")
+                        st.session_state.last_gradcam = True
+                    else:
+                        st.warning("⚠️ Model not loaded. Grad-CAM unavailable.")
+                
+                except Exception as e:
+                    st.error(f"❌ Error generating Grad-CAM: {str(e)}")
+                    logger.error(f"Grad-CAM error: {str(e)}")
+        
+        # Save prediction
+        st.subheader("💾 Save Prediction")
+        
+        if st.button("Save Prediction to Logs"):
+            success = log_prediction_csv(
+                username=st.session_state.username,
+                email=st.session_state.email,
+                filename=uploaded_file.name,
+                predicted_class=result['class_name'],
+                confidence=result['confidence'],
+                gradcam_applied=st.session_state.get('last_gradcam', False)
+            )
+            
+            if success:
+                st.success("✅ Prediction saved to logs")
+                logger.info(f"Prediction saved: {st.session_state.username}")
+            else:
+                st.error("❌ Failed to save prediction")
+        
+        # Download report
+        st.subheader("📥 Download Report")
+        
+        report_text = format_report(result, uploaded_file.name)
+        
+        st.download_button(
+            label="📄 Download Report (TXT)",
+            data=report_text,
+            file_name=f"prediction_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            mime="text/plain"
+        )
+
+
+# ============================================================================
+# PAGE: ADMIN DASHBOARD
+# ============================================================================
+
+def admin_dashboard():
+    """Display admin dashboard with statistics and logs"""
+    st.markdown('<p class="header-title">⚙️ Admin Dashboard</p>', unsafe_allow_html=True)
+    
+    admin_tab1, admin_tab2, admin_tab3 = st.tabs(["📊 Statistics", "📋 Prediction Logs", "📚 System Info"])
+    
+    # STATISTICS TAB
+    with admin_tab1:
+        st.subheader("📈 System Statistics")
+        
+        stats = get_prediction_statistics()
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Predictions", stats['total_predictions'])
+        
+        with col2:
+            st.metric("Unique Users", stats['unique_users'])
+        
+        with col3:
+            avg_conf = stats['average_confidence']
+            st.metric("Average Confidence", f"{avg_conf:.2%}")
+        
+        with col4:
+            gradcam_count = stats['gradcam_usage']
+            st.metric("Grad-CAM Usage", gradcam_count)
+        
+        # Predictions by class
+        st.subheader("🎯 Predictions by Disease Class")
+        if stats['prediction_counts']:
+            pred_df = pd.DataFrame({
+                'Class': list(stats['prediction_counts'].keys()),
+                'Count': list(stats['prediction_counts'].values())
+            })
+            st.bar_chart(pred_df.set_index('Class'))
+        else:
+            st.info("No predictions yet")
+        
+        # Device usage
+        st.subheader("💻 Device Usage")
+        if stats['by_device']:
+            device_df = pd.DataFrame({
+                'Device': list(stats['by_device'].keys()),
+                'Count': list(stats['by_device'].values())
+            })
+            st.pie_chart(device_df.set_index('Device')['Count'])
+        else:
+            st.info("No device data available")
+    
+    # LOGS TAB
+    with admin_tab2:
+        st.subheader("📊 Prediction Logs")
+        
+        df_logs = read_prediction_logs()
+        
+        if not df_logs.empty:
+            # Display table
+            st.dataframe(df_logs, use_container_width=True, height=400)
+            
+            # Export options
+            st.subheader("💾 Export Logs")
+            export_col1, export_col2, export_col3 = st.columns(3)
+            
+            with export_col1:
+                if st.button("📥 Export as CSV"):
+                    export_path = Path("exports") / f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                    if export_prediction_logs(export_path, format="csv"):
+                        st.success("✅ Exported as CSV")
+                    else:
+                        st.error("❌ Export failed")
+            
+            with export_col2:
+                if st.button("📊 Export as Excel"):
+                    export_path = Path("exports") / f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                    if export_prediction_logs(export_path, format="excel"):
+                        st.success("✅ Exported as Excel")
+                    else:
+                        st.error("❌ Export failed")
+            
+            with export_col3:
+                if st.button("📄 Export as JSON"):
+                    export_path = Path("exports") / f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    if export_prediction_logs(export_path, format="json"):
+                        st.success("✅ Exported as JSON")
+                    else:
+                        st.error("❌ Export failed")
+            
+            # Filter by user
+            st.subheader("🔍 Filter by User")
+            unique_users = df_logs['username'].unique()
+            selected_user = st.selectbox("Select User", unique_users)
+            
+            if selected_user:
+                user_logs = df_logs[df_logs['username'] == selected_user]
+                st.write(f"**Predictions by {selected_user}: {len(user_logs)}**")
+                st.dataframe(user_logs, use_container_width=True)
+        
+        else:
+            st.info("📭 No prediction logs available yet")
+    
+    # SYSTEM INFO TAB
+    with admin_tab3:
+        st.subheader("ℹ️ System Information")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("### 🤖 Model Information")
+            model_info = get_model_info()
+            st.json({
+                "Input Size": model_info['input_size'],
+                "Num Classes": model_info['num_classes'],
+                "Classes": model_info['classes'],
+                "Device": model_info['device'],
+                "Model Exists": model_info['model_exists']
+            })
+        
+        with col2:
+            st.write("### 📋 Project Details")
+            st.markdown("""
+            **Project Title:**
+            Domain-Adaptive Synthetic Data Generation for Rare Disease 
+            Chest X-Ray Classification Using Conditional Diffusion Models
+            
+            **Role:** Explainability & Deployment Developer
+            
+            **Features:**
+            - 🔐 User Authentication (Login/Signup)
+            - 🫁 X-Ray Image Classification
+            - 🔍 Grad-CAM Explainability
+            - 📊 Prediction Analytics
+            - 💾 Prediction Logging
+            - ⚙️ Admin Dashboard
+            """)
+        
+        st.subheader("🔧 Workflow Explanation")
+        
+        st.markdown("""
+        ### System Workflow:
+        
+        1. **User Authentication**
+           - Users can sign up with username, email, and password
+           - Passwords are securely hashed using PBKDF2
+           - Session management via Streamlit session_state
+        
+        2. **Image Preprocessing**
+           - Images are resized to 224×224 pixels
+           - Normalized using ImageNet statistics (mean & std)
+           - Converted to PyTorch tensors for model input
+        
+        3. **Disease Prediction**
+           - EfficientNet-B0 model processes the tensor
+           - Returns probability distribution across 3 disease classes:
+             * Normal
+             * Pleural Effusion
+             * Cardiomegaly
+        
+        4. **Explainability (Grad-CAM)**
+           - Computes gradients with respect to the last conv layer
+           - Generates activation map highlighting important regions
+           - Overlays heatmap on original image for visualization
+        
+        5. **Prediction Logging**
+           - All predictions logged to CSV with metadata
+           - Includes username, class, confidence, timestamp
+           - Supports filtering, export, and statistics
+        
+        6. **Admin Dashboard**
+           - Monitor system statistics and usage
+           - View all predictions and user activity
+           - Export reports in multiple formats
+        
+        ### Security Features:
+        - Password hashing with salt
+        - Session state authentication
+        - User role-based access control
+        - Audit logging for all operations
+        """)
+
+
+# ============================================================================
+# MAIN APPLICATION ROUTER
+# ============================================================================
+
+def main():
+    """Main application entry point"""
+    
+    if not st.session_state.authenticated:
+        # Show authentication page
+        auth_page()
+    else:
+        # Authenticated user interface
+        with st.sidebar:
+            st.markdown("---")
+            st.markdown(f"### 👤 {st.session_state.username}")
+            st.write(f"📧 {st.session_state.email}")
+            st.write(f"🔖 Role: **{st.session_state.user_role}**")
+            st.markdown("---")
+            
+            # Navigation
+            if st.session_state.user_role == "admin":
+                page = st.radio(
+                    "Navigation",
+                    ["User Dashboard", "Admin Dashboard", "Settings"],
+                    index=0
+                )
+            else:
+                page = st.radio(
+                    "Navigation",
+                    ["User Dashboard", "Settings"],
+                    index=0
+                )
             
             st.markdown("---")
-            st.subheader("🔍 Grad-CAM Visualization")
             
-            # Grad-CAM Placeholder Logic
-            heatmap_available = False # Toggle this when model is integrated
-            
-            if heatmap_available:
-                st.image("https://via.placeholder.com/400x400.png?text=Grad-CAM+Heatmap", caption="Attention Map")
-            else:
-                st.info("Grad-CAM Heatmap will be generated upon successful prediction.")
-                st.image("https://via.placeholder.com/400x400.png?text=Heatmap+Placeholder", use_container_width=True)
-
-    else:
-        st.info("Waiting for image upload...")
-
-# ==========================================
-# 5. ADMIN MODE: PROJECT METADATA
-# ==========================================
-else:
-    st.title("🛡️ Admin Control Center")
-    st.write("System configuration and training pipeline overview.")
-    
-    # Metadata Section
-    st.header("📊 Project Metadata")
-    meta_col1, meta_col2 = st.columns(2)
-    
-    with meta_col1:
-        st.markdown(f"""
-        - **Dataset Name:** ChestX-ray14 (Modified)
-        - **Number of Classes:** 14 Diseases
-        - **Model Architecture:** EfficientNet-B4
-        """)
+            if st.button("🚪 Logout", use_container_width=True):
+                logout()
         
-    with meta_col2:
-        st.markdown(f"""
-        - **Diffusion Model:** Conditional DDPM
-        - **Evaluation Metric:** F1-Score (Macro)
-        - **Target Accuracy:** > 92%
-        """)
-    
-    st.markdown("---")
-    
-    # Pipeline Section
-    st.header("⚙️ Training Pipeline")
-    st.markdown("""
-    1. **Data Acquisition:** Sourcing from NIH Clinical Center.
-    2. **Preprocessing:** CLAHE enhancement and 224x224 resizing.
-    3. **Augmentation:** Using Conditional DDPM to balance rare disease classes.
-    4. **Feature Extraction:** Transfer learning with EfficientNet backbone.
-    5. **Fine-tuning:** End-to-end training on balanced dataset.
-    6. **Evaluation:** Cross-validation and Grad-CAM verification.
-    """)
-    
-    st.success("Pipeline configuration verified for Day 2.")
+        # Route to pages
+        if page == "User Dashboard":
+            user_dashboard()
+        
+        elif page == "Admin Dashboard":
+            if st.session_state.user_role == "admin":
+                admin_dashboard()
+            else:
+                st.error("❌ Access Denied: Admin role required")
+        
+        elif page == "Settings":
+            st.subheader("⚙️ User Settings")
+            st.info("Account settings and preferences coming soon...")
 
-# ==========================================
-# 6. FOOTER
-# ==========================================
-st.markdown("---")
-st.caption("Rare Disease X-ray Project | Day 2 Update | Confidential Medical Data")
+
+if __name__ == "__main__":
+    main()
