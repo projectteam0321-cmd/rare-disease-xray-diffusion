@@ -1,48 +1,16 @@
-# Streamlit Deployment App - Requirements
-# Domain-Adaptive Synthetic Data Generation for Rare Disease Chest X-Ray Classification
-# Python 3.11 Compatible
-
-# Core Web Framework
-streamlit==1.42.1
-
-# Deep Learning & Model Serving
+streamlit
+pillow
+numpy
+opencv-python-headless
 torch
 torchvision
 torchaudio
-
-# Image Processing
-pillow==11.0.0
-opencv-python==4.8.1.78
-
-# Data Processing & Analysis
-numpy==2.0.0
-pandas==2.2.2
-scipy==1.11.4
-
-# Machine Learning & Model Evaluation
-scikit-learn==1.3.2
-
-# Visualization
-matplotlib==3.8.3
-plotly==5.18.0
-seaborn==0.13.1
-
-# Utilities
-python-dotenv==1.0.0
-requests==2.31.0
-pyyaml==6.0.1
-tqdm==4.66.2
-
-# Database
-sqlalchemy==2.0.25
-
-# Authentication & Security
-bcrypt==4.1.1
-
-# Development & Testing
-pytest==7.4.4
-black==23.12.1
-flake8==7.0.0
-
-# Additional Utilities
-platform_machine == 'x86_64'  # Optional: faster image processing
+scikit-learn
+matplotlib
+plotly
+python-dotenv
+requests
+pyyaml
+tqdm
+sqlalchemy
+bcrypt
